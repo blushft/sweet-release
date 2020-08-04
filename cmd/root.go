@@ -4,7 +4,6 @@ import (
 	"log"
 
 	"github.com/blushft/sweet-release/version"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/spf13/cobra"
 )
 
@@ -14,7 +13,7 @@ var (
 )
 
 var rootCommand = &cobra.Command{
-	Use:   "release",
+	Use:   "sweet-release",
 	Short: "Sweet Release automates versioning and releaseing your software",
 	RunE:  run,
 }
@@ -40,7 +39,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	spew.Dump(ver)
+	ver.Print()
 
 	return nil
 }

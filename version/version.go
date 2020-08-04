@@ -1,11 +1,12 @@
 package version
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/blang/semver"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -24,6 +25,7 @@ type Config struct {
 	YearFactor             int64  `json:"year_factor" yaml:"year_factor" toml:"year_factor"`
 	AddSnapshot            bool   `json:"add_snapshot" yaml:"add_snapshot" toml:"add_snapshot"`
 	AddLocalChangesDetails bool   `json:"add_local_changes_details" yaml:"add_local_changes_details" toml:"add_local_changes_details"`
+	RequireVersionTag      bool
 }
 
 func DefaultConfig() Config {
@@ -34,6 +36,7 @@ func DefaultConfig() Config {
 		YearFactor:             1000,
 		AddSnapshot:            false,
 		AddLocalChangesDetails: false,
+		RequireVersionTag:      true,
 	}
 }
 
@@ -104,8 +107,6 @@ func New(conf Config) (*Version, error) {
 		All:   true,
 	})
 
-	spew.Dump(rlog)
-
 	ccnt := int64(0)
 
 	rlog.ForEach(func(c *object.Commit) error {
@@ -139,10 +140,23 @@ func New(conf Config) (*Version, error) {
 	if err == nil {
 		gen.SemVer = sv
 	} else {
-		log.Println(err)
+		if conf.RequireVersionTag {
+			return nil, errors.New("could not find tag for commit " + cch.String())
+		}
 	}
 
 	return gen.Generate(conf)
+}
+
+func (v *Version) Print() {
+	fmt.Printf(
+		"Branch: %s\nCommit: %s\nShortCommit: %s\nVersion: %s\nRevision: %d\n",
+		v.Branch,
+		v.Commit,
+		v.ShortCommit,
+		v.Semver,
+		v.Revision,
+	)
 }
 
 func getRepo(conf Config) (*git.Repository, error) {
