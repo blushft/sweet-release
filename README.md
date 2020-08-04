@@ -1,0 +1,1 @@
+# sweet-release - Generate version and build revision from git history
