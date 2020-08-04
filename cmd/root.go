@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"log"
-
 	"github.com/blushft/sweet-release/version"
 	"github.com/spf13/cobra"
 )
@@ -29,8 +27,6 @@ func Execute() error {
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	log.Println("starting sweet release")
-
 	conf := version.DefaultConfig()
 	conf.RepoPath = repoPath
 

@@ -3,7 +3,6 @@ package version
 import (
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/blang/semver"
@@ -129,7 +128,6 @@ func New(conf Config) (*Version, error) {
 	tags.ForEach(func(t *plumbing.Reference) error {
 
 		if t.Hash() == *cch {
-			log.Println("found tag", t.Name().Short())
 			ctag = t.Name().Short()
 		}
 
