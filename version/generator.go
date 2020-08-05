@@ -2,10 +2,12 @@ package version
 
 import (
 	"errors"
+	"io"
+	"io/ioutil"
+	"log"
 	"time"
 
 	"github.com/blang/semver"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -40,8 +42,10 @@ type Generator struct {
 
 	Branch            string
 	CurrentCommit     *plumbing.Hash
+	VersionCommit     *plumbing.Hash
 	CommitCount       int64
-	SemVer            semver.Version
+	SnapshotCount     int64
+	SemVer            *semver.Version
 	InitialCommitDate time.Time
 	CurrentCommitDate time.Time
 }
@@ -87,7 +91,7 @@ func (g *Generator) Generate(conf Config) (*Version, error) {
 		Branch:      g.Branch,
 		Commit:      g.CurrentCommit.String(),
 		ShortCommit: ssha,
-		Semver:      g.SemVer,
+		Semver:      *g.SemVer,
 		Revision:    rev,
 	}, nil
 }
@@ -154,6 +158,10 @@ func (gen *Generator) getVersion(repo *git.Repository) error {
 		return err
 	}
 
+	if gen.SemVer != nil && !gen.conf.RequireVersionTag {
+		return nil
+	}
+
 	return gen.getVersionByTag(repo)
 }
 
@@ -168,7 +176,38 @@ func (gen *Generator) getVersionFile(repo *git.Repository) error {
 		return err
 	}
 
-	spew.Dump(tree.Entries)
+	for _, f := range tree.Entries {
+		if !f.Mode.IsFile() {
+			continue
+		}
+
+		if f.Name != "VERSION" {
+			continue
+		}
+
+		obj, err := repo.BlobObject(f.Hash)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+
+		r, err := obj.Reader()
+		if err != nil {
+			return err
+		}
+
+		b, err := ioutil.ReadAll(r)
+		if err != nil {
+			return err
+		}
+
+		ver, err := semver.ParseTolerant(string(b))
+		if err != nil {
+			return err
+		}
+
+		gen.SemVer = &ver
+	}
 
 	return nil
 }
@@ -179,23 +218,71 @@ func (gen *Generator) getVersionByTag(repo *git.Repository) error {
 		return err
 	}
 
-	var ctag string
-	tags.ForEach(func(t *plumbing.Reference) error {
-		if t.Hash() == *gen.CurrentCommit {
-			ctag = t.Name().Short()
+	defer tags.Close()
+
+	var cctag string
+	svts := make(map[plumbing.Hash]semver.Version)
+
+	cont := true
+
+	for cont {
+		tag, err := tags.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			continue
 		}
 
-		return nil
-	})
+		if tag.Hash() == *gen.CurrentCommit {
+			cctag = tag.Name().Short()
+			cont = false
 
-	sv, err := semver.ParseTolerant(ctag)
-	if err == nil {
-		gen.SemVer = sv
-	} else {
-		if gen.conf.RequireVersionTag {
-			return errors.New("could not find tag for commit " + gen.CurrentCommit.String())
+			continue
+		}
+
+		ver, err := semver.ParseTolerant(tag.Name().Short())
+		if err == nil {
+			svts[tag.Hash()] = ver
 		}
 	}
+
+	if len(cctag) > 0 {
+		sv, err := semver.ParseTolerant(cctag)
+		if err == nil {
+			gen.VersionCommit = gen.CurrentCommit
+			gen.SemVer = &sv
+			return nil
+		}
+	}
+
+	if gen.conf.RequireVersionTag && !gen.conf.AddSnapshot {
+		return errors.New("could not find tag for commit " + gen.CurrentCommit.String())
+	}
+
+	if len(svts) == 0 {
+		if gen.conf.RequireVersionTag {
+			return errors.New("could not find version tag for SNAPSHOT")
+		}
+	}
+
+	var latest *semver.Version
+	var vh plumbing.Hash
+	for h, t := range svts {
+		if latest == nil {
+			vh = h
+			latest = &t
+		}
+
+		if t.GT(*latest) {
+			vh = h
+			latest = &t
+		}
+	}
+
+	gen.VersionCommit = &vh
+	gen.SemVer = latest
 
 	return nil
 }
