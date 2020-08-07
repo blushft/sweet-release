@@ -123,6 +123,7 @@ func (gen *Generator) Generate() (*Version, error) {
 	}
 
 	build := []string{
+		"rev",
 		fmt.Sprintf("%d", rev),
 	}
 
@@ -367,6 +368,8 @@ func (gen *Generator) getVersionByTag() error {
 	if gen.Conf.FromTag && !gen.Conf.AddSnapshot {
 		return errors.New("could not find tag for commit " + gen.CurrentCommit.String())
 	}
+
+	gen.IsSnapshot = true
 
 	if len(svts) == 0 {
 		if gen.Conf.FromTag {
