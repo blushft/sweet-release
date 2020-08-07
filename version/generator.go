@@ -1,13 +1,18 @@
 package version
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -18,41 +23,40 @@ const (
 )
 
 type Config struct {
-	RepoPath          string `json:"repo_path" yaml:"repo_path" toml:"repo_path"`
-	Clone             bool   `json:"clone" yaml:"clone" toml:"clone"`
-	Revision          string `json:"base_branch" yaml:"base_branch" toml:"base_branch"`
-	YearFactor        int64  `json:"year_factor" yaml:"year_factor" toml:"year_factor"`
-	AddSnapshot       bool   `json:"add_snapshot" yaml:"add_snapshot" toml:"add_snapshot"`
-	RequireVersionTag bool   `json:"require_version_tag" yaml:"require_version_tag" toml:"require_version_tag"`
-}
-
-func DefaultConfig() Config {
-	return Config{
-		RepoPath:          "./",
-		Clone:             false,
-		Revision:          "HEAD",
-		YearFactor:        1000,
-		AddSnapshot:       true,
-		RequireVersionTag: true,
-	}
+	RepoPath       string
+	Clone          bool
+	Revision       string
+	TimeMultiplier int64
+	AddSnapshot    bool
+	VersionFile    string
+	FromFile       bool
+	FromTag        bool
+	StableBranches []string
 }
 
 type Generator struct {
-	conf Config
+	Conf   Config
+	repo   *git.Repository
+	status *git.Status
 
 	Branch            string
+	SemVer            *semver.Version
 	CurrentCommit     *plumbing.Hash
 	VersionCommit     *plumbing.Hash
-	CommitCount       int64
-	SnapshotCount     int64
-	SemVer            *semver.Version
+	InitialCommit     *plumbing.Hash
 	InitialCommitDate time.Time
 	CurrentCommitDate time.Time
+	VersionCommitDate time.Time
+	CommitCount       int64
+	IsSnapshot        bool
+	IsPre             bool
+	PreChannel        string
+	PreRev            int64
 }
 
 func NewGenerator(conf Config) (*Generator, error) {
 	gen := &Generator{
-		conf: conf,
+		Conf: conf,
 	}
 
 	repo, err := gen.getRepo()
@@ -60,64 +64,123 @@ func NewGenerator(conf Config) (*Generator, error) {
 		return nil, err
 	}
 
-	if err := gen.getBranch(repo); err != nil {
+	gen.repo = repo
+
+	wt, err := repo.Worktree()
+	if err != nil {
 		return nil, err
 	}
 
-	if err := gen.getCurrentCommit(repo); err != nil {
+	status, err := wt.Status()
+	if err != nil {
 		return nil, err
 	}
 
-	if err := gen.getInitialCommit(repo); err != nil {
+	gen.status = &status
+
+	if !status.IsClean() {
+		if !conf.AddSnapshot {
+			return nil, errors.New("repository is not clean and add snapshot config is false")
+		}
+
+		gen.IsSnapshot = true
+	}
+
+	if err := gen.getBranch(); err != nil {
 		return nil, err
 	}
 
-	if err := gen.getVersion(repo); err != nil {
+	if err := gen.getCurrentCommit(); err != nil {
+		return nil, err
+	}
+
+	if err := gen.getInitialCommit(); err != nil {
+		return nil, err
+	}
+
+	if err := gen.getVersion(); err != nil {
 		return nil, err
 	}
 
 	return gen, nil
 }
 
-func (g *Generator) Generate(conf Config) (*Version, error) {
-	cdiff := g.CurrentCommitDate.Sub(g.InitialCommitDate).Seconds()
+func (gen *Generator) Generate() (*Version, error) {
+	cdiff := gen.CurrentCommitDate.Sub(gen.InitialCommitDate).Seconds()
 
-	tf := int64(cdiff) * conf.YearFactor / secondsYear
-	rev := g.CommitCount + tf
+	tf := int64(cdiff) * gen.Conf.TimeMultiplier / secondsYear
+	rev := gen.CommitCount + tf
 
-	ssha := g.CurrentCommit.String()[:7]
+	ssha := gen.CurrentCommit.String()[:7]
+
+	if gen.IsPre {
+		pre, err := semver.NewPRVersion(gen.Branch)
+		if err != nil {
+			return nil, err
+		}
+
+		gen.SemVer.Pre = append(gen.SemVer.Pre, pre)
+	}
+
+	build := []string{
+		fmt.Sprintf("%d", rev),
+	}
+
+	if gen.IsSnapshot {
+		snap, err := semver.NewBuildVersion("SNAPSHOT")
+		if err != nil {
+			return nil, err
+		}
+
+		scnt, err := gen.getCommitCountFrom(gen.VersionCommitDate)
+		if err != nil {
+			return nil, err
+		}
+
+		build = append(build, snap, fmt.Sprintf("%d", scnt))
+	}
+
+	gen.SemVer.Build = build
 
 	return &Version{
-		Branch:      g.Branch,
-		Commit:      g.CurrentCommit.String(),
+		Branch:      gen.Branch,
+		Commit:      gen.CurrentCommit.String(),
 		ShortCommit: ssha,
-		Semver:      *g.SemVer,
-		Revision:    rev,
+		Semver:      *gen.SemVer,
+		BuildID:     rev,
 	}, nil
 }
 
 func (gen *Generator) getRepo() (*git.Repository, error) {
-	return git.PlainOpen(gen.conf.RepoPath)
+	return git.PlainOpen(gen.Conf.RepoPath)
 }
 
-func (gen *Generator) getBranch(repo *git.Repository) error {
-	rev, err := repo.Head()
+func (gen *Generator) getBranch() error {
+	rev, err := gen.repo.Head()
 	if err != nil {
 		return err
 	}
 
 	gen.Branch = rev.Name().Short()
 
+	gen.IsPre = true
+	for _, s := range gen.Conf.StableBranches {
+		if strings.EqualFold(gen.Branch, s) {
+			gen.IsPre = false
+			break
+		}
+	}
+
 	return nil
 }
 
-func (gen *Generator) getCurrentCommit(repo *git.Repository) error {
-	cch, err := repo.ResolveRevision(plumbing.Revision(gen.conf.Revision))
+func (gen *Generator) getCurrentCommit() error {
+	cch, err := gen.repo.ResolveRevision(plumbing.Revision(gen.Conf.Revision))
 	if err != nil {
 		return err
 	}
 
-	cc, err := repo.CommitObject(*cch)
+	cc, err := gen.repo.CommitObject(*cch)
 	if err != nil {
 		return err
 	}
@@ -128,8 +191,8 @@ func (gen *Generator) getCurrentCommit(repo *git.Repository) error {
 	return err
 }
 
-func (gen *Generator) getInitialCommit(repo *git.Repository) error {
-	rlog, err := repo.Log(&git.LogOptions{
+func (gen *Generator) getInitialCommit() error {
+	rlog, err := gen.repo.Log(&git.LogOptions{
 		Order: git.LogOrderCommitterTime,
 		All:   true,
 	})
@@ -141,6 +204,7 @@ func (gen *Generator) getInitialCommit(repo *git.Repository) error {
 
 	rlog.ForEach(func(c *object.Commit) error {
 		if c.NumParents() == 0 {
+			gen.InitialCommit = &c.Hash
 			gen.InitialCommitDate = c.Committer.When.UTC()
 		}
 
@@ -153,20 +217,62 @@ func (gen *Generator) getInitialCommit(repo *git.Repository) error {
 	return nil
 }
 
-func (gen *Generator) getVersion(repo *git.Repository) error {
-	if err := gen.getVersionFile(repo); err != nil {
-		return err
+func (gen *Generator) getCommitCountFrom(from time.Time) (int64, error) {
+	clog, err := gen.repo.Log(&git.LogOptions{
+		Since: &from,
+	})
+
+	if err != nil {
+		return 0, err
 	}
 
-	if gen.SemVer != nil && !gen.conf.RequireVersionTag {
+	var cnt int64 = 0
+	clog.ForEach(func(c *object.Commit) error {
+		cnt++
+		return nil
+	})
+
+	return cnt, nil
+}
+
+func (gen *Generator) getVersion() error {
+	if err := gen.getVersionFile(); err != nil {
+		if gen.Conf.FromFile {
+			return err
+		}
+	}
+
+	if gen.SemVer != nil && !gen.Conf.FromTag {
 		return nil
 	}
 
-	return gen.getVersionByTag(repo)
+	return gen.getVersionByTag()
 }
 
-func (gen *Generator) getVersionFile(repo *git.Repository) error {
-	commit, err := repo.CommitObject(*gen.CurrentCommit)
+func (gen *Generator) getVersionFile() error {
+	fp := filepath.Join(gen.Conf.RepoPath, gen.Conf.VersionFile)
+
+	b, err := ioutil.ReadFile(fp)
+	if os.IsNotExist(err) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	sv, err := semver.ParseTolerant(string(bytes.TrimSpace(b)))
+	if err != nil {
+		return err
+	}
+
+	gen.SemVer = &sv
+
+	return nil
+}
+
+func (gen *Generator) getCommittedVersionFile() error {
+	commit, err := gen.repo.CommitObject(*gen.CurrentCommit)
 	if err != nil {
 		return err
 	}
@@ -185,7 +291,7 @@ func (gen *Generator) getVersionFile(repo *git.Repository) error {
 			continue
 		}
 
-		obj, err := repo.BlobObject(f.Hash)
+		obj, err := gen.repo.BlobObject(f.Hash)
 		if err != nil {
 			log.Println(err)
 			continue
@@ -212,8 +318,8 @@ func (gen *Generator) getVersionFile(repo *git.Repository) error {
 	return nil
 }
 
-func (gen *Generator) getVersionByTag(repo *git.Repository) error {
-	tags, err := repo.Tags()
+func (gen *Generator) getVersionByTag() error {
+	tags, err := gen.repo.Tags()
 	if err != nil {
 		return err
 	}
@@ -252,17 +358,18 @@ func (gen *Generator) getVersionByTag(repo *git.Repository) error {
 		sv, err := semver.ParseTolerant(cctag)
 		if err == nil {
 			gen.VersionCommit = gen.CurrentCommit
+			gen.VersionCommitDate = gen.CurrentCommitDate
 			gen.SemVer = &sv
 			return nil
 		}
 	}
 
-	if gen.conf.RequireVersionTag && !gen.conf.AddSnapshot {
+	if gen.Conf.FromTag && !gen.Conf.AddSnapshot {
 		return errors.New("could not find tag for commit " + gen.CurrentCommit.String())
 	}
 
 	if len(svts) == 0 {
-		if gen.conf.RequireVersionTag {
+		if gen.Conf.FromTag {
 			return errors.New("could not find version tag for SNAPSHOT")
 		}
 	}
@@ -281,7 +388,13 @@ func (gen *Generator) getVersionByTag(repo *git.Repository) error {
 		}
 	}
 
+	vc, err := gen.repo.CommitObject(vh)
+	if err != nil {
+		return err
+	}
+
 	gen.VersionCommit = &vh
+	gen.VersionCommitDate = vc.Committer.When.UTC()
 	gen.SemVer = latest
 
 	return nil

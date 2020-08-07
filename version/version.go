@@ -3,17 +3,17 @@ package version
 import (
 	"fmt"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 )
 
 type Formatter interface{}
 
 type Version struct {
-	Branch      string
-	Commit      string
-	ShortCommit string
-	Semver      semver.Version
-	Revision    int64
+	Branch      string         `json:"branch"`
+	Commit      string         `json:"commit"`
+	ShortCommit string         `json:"short_commit"`
+	Semver      semver.Version `json:"semver"`
+	BuildID     int64          `json:"build_id"`
 }
 
 func New(conf Config) (*Version, error) {
@@ -22,7 +22,7 @@ func New(conf Config) (*Version, error) {
 		return nil, err
 	}
 
-	return gen.Generate(conf)
+	return gen.Generate()
 }
 
 func (v *Version) Print() {
@@ -32,6 +32,6 @@ func (v *Version) Print() {
 		v.Commit,
 		v.ShortCommit,
 		v.Semver,
-		v.Revision,
+		v.BuildID,
 	)
 }
