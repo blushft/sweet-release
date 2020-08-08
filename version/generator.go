@@ -107,9 +107,10 @@ func NewGenerator(conf Config) (*Generator, error) {
 
 func (gen *Generator) Generate() (*Version, error) {
 	cdiff := gen.CurrentCommitDate.Sub(gen.InitialCommitDate).Seconds()
+	repoAge := int64(time.Now().Sub(gen.InitialCommitDate).Hours())
 
 	tf := int64(cdiff) * gen.Conf.TimeMultiplier / secondsYear
-	rev := gen.CommitCount + tf
+	rev := gen.CommitCount + repoAge + tf
 
 	ssha := gen.CurrentCommit.String()[:7]
 

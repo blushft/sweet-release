@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/blushft/sweet-release/template"
 	"github.com/blushft/sweet-release/version"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -33,6 +33,8 @@ func init() {
 	flgs.Bool("add-snapshot", false, "Add snapshot pre to semver")
 	flgs.StringSlice("stable-branches", []string{}, "Branches to treat as stable")
 
+	flgs.String("out", "version_file", "Desired output")
+
 	viper.BindPFlags(flgs)
 	viper.SetEnvPrefix("SREL")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
@@ -47,6 +49,7 @@ func init() {
 	viper.SetDefault("from-file", false)
 	viper.SetDefault("from-tag", true)
 	viper.SetDefault("stable-branches", []string{"master", "main", "stable", "release"})
+	viper.SetDefault("out", "version_file")
 }
 
 func Execute() error {
@@ -61,8 +64,6 @@ func configure(cmd *cobra.Command, args []string) {
 			panic(err)
 		}
 	}
-
-	spew.Dump(viper.AllSettings())
 }
 
 func loadConfigFile(f string) error {
@@ -92,14 +93,17 @@ func loadConfigFile(f string) error {
 
 func run(cmd *cobra.Command, args []string) error {
 	conf := getConfig()
-	spew.Dump(conf)
 
 	ver, err := version.New(conf)
 	if err != nil {
 		return err
 	}
 
-	ver.Print()
+	tmpl, err := template.New()
+
+	if err := tmpl.Execute(viper.GetString("out"), ver); err != nil {
+		return err
+	}
 
 	return nil
 }
